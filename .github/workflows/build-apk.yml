@@ -1,0 +1,283 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
+  PYTHON_VERSION: "3.10"
+  PRODUCTION_ABI: "arm64-v8a,x86_64"
+  NDK_VERSION: "27.2.12479018"
+  CMAKE_VERSION: "3.22.1"
+
+permissions:
+  contents: write
+
+jobs:
+  unit-tests:
+    name: Unit tests and Android Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests and lint
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug -Plucknow.withLlama=false --stacktrace
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+            app/build/test-results/
+          retention-days: 14
+
+  python-tests:
+    name: Python statistical engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned scientific stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r python_tests/requirements.txt
+
+      - name: Verify the on-device analysis module
+        run: python python_tests/test_analysis.py
+
+  bdd:
+    name: BDD (Cucumber-Android on API 34)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        abi: [x86_64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Cucumber scenarios
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: ${{ matrix.abi }}
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ./gradlew :app:connectedDebugAndroidTest -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=false --stacktrace
+
+      - name: Upload BDD reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd-reports-${{ matrix.abi }}
+          path: app/build/reports/androidTests/
+          retention-days: 14
+
+  build-apk:
+    name: Build signed APK (${{ matrix.abi }})
+    needs: [unit-tests, python-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        abi: [arm64-v8a, x86_64]
+      fail-fast: false
+    outputs:
+      signing_source: ${{ steps.signing.outputs.signing_source }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Vendor pinned llama.cpp
+        run: bash scripts/fetch-llama-cpp.sh
+
+      - name: Install NDK and CMake
+        run: |
+          SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+
+      - name: Configure release signing
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE="$RUNNER_TEMP/lucknow-release.jks"
+
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+            {
+              echo "LUCKNOW_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+              echo "LUCKNOW_KEY_ALIAS=${ANDROID_KEY_ALIAS:-lucknow}"
+              echo "LUCKNOW_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            } >> "$GITHUB_ENV"
+            echo "signing_source=repository secrets" >> "$GITHUB_OUTPUT"
+          else
+            EPHEMERAL_PASSWORD="$(openssl rand -hex 16)"
+            keytool -genkeypair -keystore "$KEYSTORE" -storetype PKCS12 -alias lucknow \
+              -keyalg RSA -keysize 2048 -validity 3650 \
+              -storepass "$EPHEMERAL_PASSWORD" -keypass "$EPHEMERAL_PASSWORD" \
+              -dname "CN=Luck Now CI, O=CI, C=US" >/dev/null 2>&1
+            {
+              echo "LUCKNOW_KEYSTORE_PASSWORD=$EPHEMERAL_PASSWORD"
+              echo "LUCKNOW_KEY_ALIAS=lucknow"
+              echo "LUCKNOW_KEY_PASSWORD=$EPHEMERAL_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "signing_source=ephemeral CI keystore" >> "$GITHUB_OUTPUT"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured. The release APK is signed with an ephemeral CI key and must not be published to Play."
+          fi
+
+          echo "LUCKNOW_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+
+      - name: Build debug and release APKs
+        run: |
+          ./gradlew :app:assembleDebug :app:assembleRelease \
+            -PabiFilters=${{ matrix.abi }} \
+            -Plucknow.withLlama=true --stacktrace
+
+      - name: Publish per-ABI artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk "artifacts/app-${{ matrix.abi }}-debug.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk "artifacts/app-${{ matrix.abi }}-release.apk"
+          else
+            cp app/build/outputs/apk/release/app-release-unsigned.apk "artifacts/app-${{ matrix.abi }}-release.apk"
+          fi
+          cp app/build/outputs/mapping/release/mapping.txt "artifacts/mapping-${{ matrix.abi }}.txt" || true
+          ls -lh artifacts
+
+      - name: Verify APK signature and ABI
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)"
+          "$APKSIGNER" verify --verbose "artifacts/app-${{ matrix.abi }}-release.apk" | head -20
+          "$AAPT2" dump badging "artifacts/app-${{ matrix.abi }}-release.apk" | grep -E "package:|sdkVersion|targetSdkVersion|native-code"
+          unzip -l "artifacts/app-${{ matrix.abi }}-release.apk" | grep -E "libll(ama|ucknow_llm)\" \
+            || { echo "::error::native llama.cpp runtime missing from the release APK"; exit 1; }
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: luck-now-${{ matrix.abi }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summarise artifact
+        run: |
+          {
+            echo "### Luck Now APK"
+            echo ""
+            echo "- Artifact: \`app-${{ matrix.abi }}-release.apk\`"
+            echo "- Signing: ${{ steps.signing.outputs.signing_source }}"
+            echo "- Version: $(grep -oP 'versionName = "\\K[^"]+\' app/build.gradle.kts || true)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APKs (both ABIs)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: luck-now-*
+          path: artifacts
+
+      - name: Assemble release bundle
+        run: |
+          mkdir -p artifacts/final
+          cp -r artifacts/luck-now-arm64-v8a/**/* artifacts/final/ || true
+          cp -r artifacts/luck-now-x86_64/**/* artifacts/final/ || true
+          ls -lh artifacts/final
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/final/app-arm64-v8a-release.apk
+            artifacts/final/app-arm64-v8a-debug.apk
+            artifacts/final/app-x86_64-release.apk
+            artifacts/final/app-x86_64-debug.apk
+            artifacts/final/mapping-arm64-v8a.txt
+            artifacts/final/mapping-x86_64.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: false
