@@ -1,0 +1,56 @@
+# Deploy workflow: pushes APK releases to GitHub
+
+name: Deploy Releases
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/build.gradle.kts'
+      - '.github/workflows/build-apk.yml'
+      - 'app/src/main/**'
+      - 'app/build/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: luck-now-*
+          path: artifacts
+
+      - name: Push releases to GitHub
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          # Decode the deploy key and set up SSH
+          echo "$DEPLOY_KEY" | base64 -d > ~/.ssh/lucknow_deploy
+          chmod 600 ~/.ssh/lucknow_deploy
+          cat >> ~/.ssh/config << 'EOF'
+
+Host github.com
+  IdentityFile ~/.ssh/lucknow_deploy
+  IdentitiesOnly yes
+EOF
+
+          # Configure git
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # Push the artifacts to a releases branch
+          git checkout -b releases
+          git add -f artifacts/
+          git commit -m "Add release artifacts [skip ci]" || echo "No changes to commit"
+          git push origin releases --force
+
+          echo "Releases pushed successfully!"
