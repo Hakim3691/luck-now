@@ -1,0 +1,15 @@
+local.properties
+keystore.properties
+*.iml
+.idea
+/app/build
+/app/.cxx
+*/build/
+
+third_party/llama.cpp
+
+# Gradle wrapper (not used by this project's CI/build)
+gradlew
+gradlew.bat
+gradle/wrapper/gradle-wrapper.jar
+gradle/wrapper/gradle-wrapper.properties
