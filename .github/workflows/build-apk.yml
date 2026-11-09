@@ -149,14 +149,30 @@ jobs:
           arch: ${{ matrix.abi }}
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: gradle :app:connectedDebugAndroidTest -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=false --stacktrace
+          script: |
+            set +e
+            gradle :app:connectedDebugAndroidTest -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=false --stacktrace --console=plain
+            status=$?
+            if [ $status -ne 0 ]; then
+              # The HTML report only says "Process crashed", so dump the device log
+              # to make instrumentation failures diagnosable from the job log.
+              echo "::group::logcat crash buffer"
+              adb logcat -d -b crash -v brief | tail -120
+              echo "::endgroup::"
+              echo "::group::logcat app/webview"
+              adb logcat -d -v brief | grep -iE "lucknow|chromium|webview|AndroidRuntime|FATAL|chaquopy" | tail -300
+              echo "::endgroup::"
+            fi
+            exit $status
 
       - name: Upload BDD reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bdd-reports-${{ matrix.abi }}
-          path: app/build/reports/androidTests/
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
           if-no-files-found: warn
           retention-days: 14
 
