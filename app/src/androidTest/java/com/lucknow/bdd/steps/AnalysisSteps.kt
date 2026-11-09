@@ -28,7 +28,7 @@ class AnalysisSteps {
 
     @Given("a normalized array of historical draw integers that favour one ball")
     fun biasedSequence() {
-        BddWorld.sequence = List(100) { 1 } + (2..6).flatMap { value -> List(20) { value } }
+        BddWorld.sequence = skewedSequence(size = 200)
     }
 
     @When("the Autocorrelation test is executed")
@@ -104,6 +104,27 @@ class AnalysisSteps {
         return List(size) { index ->
             val hash = digest.digest("lucknow-$index".toByteArray())
             (((hash[0].toInt() and 0xFF) shl 8) or (hash[1].toInt() and 0xFF)) % 6 + 1
+        }
+    }
+
+    /**
+     * A loaded machine: ball 1 comes up about half the time and the remaining
+     * balls share the rest. The order is deterministic yet serially independent
+     * (SHA-256 of the index), because a physically biased machine skews the
+     * *distribution*, not the *order*: block-ordered draws would also be
+     * perfectly autocorrelated, so the engine would report a PRNG flaw and the
+     * headline would (correctly) hide the bias finding.
+     *
+     * Verified host-side against the real engine: chi-square p = 4.1e-44 and
+     * the largest |ACF| (0.098) stays under the significance threshold (0.139)
+     * for n = 200, so no lag is flagged and the bias headline is shown.
+     */
+    private fun skewedSequence(size: Int): List<Int> {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return List(size) { index ->
+            val hash = digest.digest("lucknow-loaded-27-$index".toByteArray())
+            val draw = ((hash[0].toInt() and 0xFF) shl 8) or (hash[1].toInt() and 0xFF)
+            if (draw < 32_768) 1 else 2 + (draw % 5)
         }
     }
 }
