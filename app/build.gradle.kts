@@ -58,6 +58,15 @@ android {
 
         testInstrumentationRunner = "io.cucumber.android.runner.CucumberAndroidJUnitRunner"
 
+        // cucumber-android searches for the @CucumberOptions class inside the test APK's
+        // own package, which `applicationIdSuffix = ".debug"` turns into
+        // com.lucknow.debug.test. The runner lives in com.lucknow.bdd, so every emulator
+        // run aborted with "No CucumberOptions annotated class present in package
+        // com.lucknow.debug.test". Align the test package with the BDD classes and pass
+        // the package explicitly for the documented lookup path.
+        testApplicationId = "com.lucknow.bdd"
+        testInstrumentationRunnerArguments["optionsAnnotationPackage"] = "com.lucknow.bdd"
+
         ndk {
             abiFilters.addAll(targetAbis)
         }
