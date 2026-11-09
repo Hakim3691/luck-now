@@ -131,7 +131,12 @@ class ScanViewModel(
 
                 val documents = result.payloads.map { payload -> payload.body }
                 if (documents.isEmpty()) {
-                    fail(record.id, "No JSON payloads were intercepted on that page.")
+                    fail(
+                        record.id,
+                        "Nothing analysable on that page: no JSON payload with draw numbers was " +
+                            "intercepted. These sites render results as HTML or hide them behind a " +
+                            "cookie/JS challenge, which this scan cannot normalize.",
+                    )
                     return@launch
                 }
 
