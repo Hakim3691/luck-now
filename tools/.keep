@@ -1,7 +1,0 @@
-#!/usr/bin/env python3
-"""Seed the repository with the full source tree.
-
-Kept out of the build: this workflow only exists to materialise files in one
-commit and is removed once the tree is in place.
-"""
-print("seed")
