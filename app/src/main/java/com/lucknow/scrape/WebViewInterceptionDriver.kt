@@ -15,8 +15,8 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import java.security.MessageDigest
 import kotlin.coroutines.resume
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -29,6 +29,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * The WebView must stay attached and laid out for lazy-loading pages to fire
  * their API calls, so it is added to the activity's decor view at full size with
  * zero alpha rather than being detached or zero-sized.
+ *
+ * Every wait in a session is bounded. A renderer that stops answering, a page
+ * that never finishes loading, and a page that reloads itself behind a cookie
+ * challenge all end the session with a log line instead of leaving the scan
+ * spinning behind a frozen progress bar.
  */
 class WebViewInterceptionDriver(
     private val activity: Activity,
@@ -53,7 +58,10 @@ class WebViewInterceptionDriver(
         }
 
         val started = clock()
-        val pageFinished = CompletableDeferred<String>()
+        // Several sites answer the first request with a stub that sets a cookie
+        // and calls location.reload(). Every finished navigation is reported here
+        // so the session scans the document that actually carries the results.
+        val navigations = Channel<String>(Channel.CONFLATED)
         val webView = createWebView()
         var pageLoaded = false
         var timedOut = false
@@ -80,36 +88,57 @@ class WebViewInterceptionDriver(
                 transport = transport,
                 onCapture = { payload -> accept(payload, onPayload, onLog) },
                 onLog = onLog,
-                onPageFinished = { finishedUrl -> pageFinished.complete(finishedUrl) },
+                onPageFinished = { finishedUrl -> navigations.trySend(finishedUrl) },
             )
             webView.loadUrl(url)
             onLog("Loaded $url in hidden WebView")
 
-            pageLoaded = withTimeoutOrNull(config.pageLoadTimeoutMs) { pageFinished.await() } != null
-            if (!pageLoaded) {
+            val firstNavigation = withTimeoutOrNull(config.pageLoadTimeoutMs) { navigations.receive() }
+            pageLoaded = firstNavigation != null
+            if (firstNavigation == null) {
                 onLog("Page did not reach onPageFinished within ${config.pageLoadTimeoutMs} ms")
+            } else {
+                var settledUrl = firstNavigation
+                var followUps = 0
+                while (followUps < MAX_FOLLOW_UP_NAVIGATIONS) {
+                    val next = withTimeoutOrNull(config.reloadGraceMs) { navigations.receive() } ?: break
+                    settledUrl = next
+                    followUps++
+                    onLog("Follow-up navigation to ${next.take(120)}; scanning the new document")
+                }
+                if (settledUrl != url) onLog("Scanning document ${settledUrl.take(160)}")
             }
 
-            // Direct JSON endpoints (and pages whose XHR hooks are unavailable)
-            // still resolve through a single re-fetch.
+            // A JSON endpoint (and pages whose XHR hooks are unavailable) still
+            // resolves through a single re-fetch. The transport blocks, so this
+            // runs off the main thread: on the main thread it fails immediately
+            // as a NetworkOnMainThreadException, whose message is null.
             if (count() == 0) {
-                captureDirectJson(url, onPayload, onLog)
+                withContext(Dispatchers.IO) { captureDirectJson(url, onPayload, onLog) }
             }
 
             val deadline = started + config.settleTimeoutMs
             var stagnant = 0
             while (steps < config.maxScrollSteps && clock() < deadline) {
                 val before = count()
-                webView.evaluateScript(ScrollScript.scrollOnce)
+                val scrolled = withTimeoutOrNull(config.stepTimeoutMs) {
+                    webView.evaluateScript(ScrollScript.scrollOnce)
+                }
+                if (scrolled == null) {
+                    onLog("Page stopped responding at scroll step ${steps + 1}; ending the session")
+                    break
+                }
                 delay(config.stepDelayMs)
                 steps++
                 val after = count()
                 stagnant = if (after == before) stagnant + 1 else 0
+                if (after > before) onLog("Scroll step $steps produced ${after - before} new payload(s)")
                 if (stagnant >= 2 && steps >= 2) break
             }
             if (steps < config.maxScrollSteps && clock() >= deadline) timedOut = true
             onLog("Interception finished: ${count()} JSON payload(s) in $steps scroll step(s)")
         } finally {
+            navigations.close()
             cleanup(webView)
         }
 
@@ -134,7 +163,7 @@ class WebViewInterceptionDriver(
             if (policy.looksLikeJsonBody(body)) {
                 accept(CapturedPayload(url, body, response.contentType), onPayload, onLog)
             }
-        }.onFailure { onLog("Direct JSON probe failed: ${it.message}") }
+        }.onFailure { onLog("Direct JSON probe failed: ${it.message ?: it::class.java.simpleName}") }
     }
 
     private fun accept(
@@ -237,5 +266,9 @@ class WebViewInterceptionDriver(
             const val NAME = "LuckNowBridge"
             const val MAX_JS_BODY = 512_000
         }
+    }
+
+    private companion object {
+        const val MAX_FOLLOW_UP_NAVIGATIONS = 3
     }
 }
