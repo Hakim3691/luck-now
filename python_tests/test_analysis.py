@@ -6,6 +6,7 @@ against CPython 3.10 with the same pinned library versions as the APK.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import sys
@@ -22,6 +23,21 @@ def run(values, **options) -> dict:
     return json.loads(analysis.analyze(json.dumps(values), json.dumps(options)))
 
 
+def loaded_machine_sequence(prefix: str = "lucknow-loaded-27", size: int = 200) -> list:
+    """Mirror of the BDD fixture in ``AnalysisSteps.skewedSequence``.
+
+    Ball 1 comes up about half the time, the other balls share the rest. The
+    order is SHA-256 mixed, so the fixture models a machine that skews the
+    distribution without also skewing the order.
+    """
+    values = []
+    for index in range(size):
+        digest = hashlib.sha256(f"{prefix}-{index}".encode()).digest()
+        draw = int.from_bytes(digest[:2], "big")
+        values.append(1 if draw < 32768 else 2 + draw % 5)
+    return values
+
+
 class ChiSquareTests(unittest.TestCase):
     def test_uniform_sequence_is_not_flagged(self):
         rng = random.Random(11)
@@ -33,13 +49,28 @@ class ChiSquareTests(unittest.TestCase):
         self.assertFalse(report["chi_square"]["biased"])
 
     def test_biased_machine_is_flagged(self):
-        values = [1] * 100 + [2, 3, 4, 5, 6] * 20
+        values = loaded_machine_sequence()
         report = run(values)
         self.assertTrue(report["chi_square"]["biased"])
         self.assertLess(report["chi_square"]["p_value"], 0.05)
         self.assertEqual(report["verdict"], "biased")
         codes = [warning["code"] for warning in report["warnings"]]
         self.assertIn("MECHANICAL_BIAS_DETECTED", codes)
+
+    def test_biased_machine_fixture_does_not_look_like_a_prng_flaw(self):
+        """The bias headline must not be hidden behind a PRNG finding.
+
+        A block-ordered skewed fixture is also perfectly autocorrelated, so the
+        engine reports both codes and the UI shows the PRNG verdict instead.
+        The BDD fixture is serially mixed for exactly this reason.
+        """
+        report = run(loaded_machine_sequence())
+        self.assertLess(report["chi_square"]["p_value"], 1e-10)
+        self.assertEqual(report["autocorrelation"]["significant_lags"], [])
+        self.assertEqual(report["verdict"], "biased")
+        codes = [warning["code"] for warning in report["warnings"]]
+        self.assertIn("MECHANICAL_BIAS_DETECTED", codes)
+        self.assertNotIn("PRNG_FLAW_DETECTED", codes)
 
     def test_counts_match_observed_support(self):
         values = [1, 1, 2, 3, 3, 3, 4]
