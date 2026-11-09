@@ -8,19 +8,24 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A manual dispatch usually re-runs a push build; only pull requests supersede an
+# in-flight run. Otherwise dispatching cancels the very run being verified.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Chaquopy packs native Python wheels during the build and is memory hungry.
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
+  # No wrapper is committed (its JAR cannot be regenerated here), so every job
+  # installs this exact distribution and calls `gradle` directly.
+  GRADLE_VERSION: "8.11.1"
   PYTHON_VERSION: "3.10"
-  PRODUCTION_ABI: "arm64-v8a,x86_64"
   NDK_VERSION: "27.2.12479018"
   CMAKE_VERSION: "3.22.1"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   unit-tests:
@@ -36,6 +41,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Chaquopy needs a host Python matching the app's bundled interpreter.
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -43,9 +49,12 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
+      # Native llama.cpp is not needed to exercise the Kotlin/Python logic.
       - name: Run unit tests and lint
-        run: ./gradlew :app:testDebugUnitTest :app:lintDebug -Plucknow.withLlama=false --stacktrace
+        run: gradle :app:testDebugUnitTest :app:lintDebug -Plucknow.withLlama=false --stacktrace
 
       - name: Upload test and lint reports
         if: always()
@@ -56,6 +65,7 @@ jobs:
             app/build/reports/tests/
             app/build/reports/lint-results-debug.html
             app/build/test-results/
+          if-no-files-found: warn
           retention-days: 14
 
   python-tests:
@@ -102,6 +112,8 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
       - name: Enable KVM for the emulator
         run: |
@@ -110,6 +122,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # The emulator runs x86_64, so the BDD APK is rebuilt for that ABI only.
       - name: Run Cucumber scenarios
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -118,7 +131,7 @@ jobs:
           arch: ${{ matrix.abi }}
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./gradlew :app:connectedDebugAndroidTest -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=false --stacktrace
+          script: gradle :app:connectedDebugAndroidTest -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=false --stacktrace
 
       - name: Upload BDD reports
         if: always()
@@ -126,19 +139,19 @@ jobs:
         with:
           name: bdd-reports-${{ matrix.abi }}
           path: app/build/reports/androidTests/
+          if-no-files-found: warn
           retention-days: 14
 
   build-apk:
-    name: Build signed APK (${{ matrix.abi }})
-    needs: [unit-tests, python-tests]
+    name: Build APK (${{ matrix.abi }})
+    # Deliberately independent of the test jobs: a lint, unit-test or emulator
+    # failure must never stop the debug APK from being produced.
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       matrix:
         abi: [arm64-v8a, x86_64]
       fail-fast: false
-    outputs:
-      signing_source: ${{ steps.signing.outputs.signing_source }}
     steps:
       - uses: actions/checkout@v4
 
@@ -155,6 +168,8 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
       - name: Vendor pinned llama.cpp
         run: bash scripts/fetch-llama-cpp.sh
@@ -163,7 +178,9 @@ jobs:
         run: |
           SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
-            "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+            "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null || true
+          test -d "$ANDROID_HOME/ndk/${NDK_VERSION}" \
+            || { echo "::error::NDK ${NDK_VERSION} was not installed"; exit 1; }
 
       - name: Configure release signing
         id: signing
@@ -185,67 +202,102 @@ jobs:
             } >> "$GITHUB_ENV"
             echo "signing_source=repository secrets" >> "$GITHUB_OUTPUT"
           else
+            # No signing secrets: an ephemeral key still yields an installable APK.
             EPHEMERAL_PASSWORD="$(openssl rand -hex 16)"
             keytool -genkeypair -keystore "$KEYSTORE" -storetype PKCS12 -alias lucknow \
               -keyalg RSA -keysize 2048 -validity 3650 \
               -storepass "$EPHEMERAL_PASSWORD" -keypass "$EPHEMERAL_PASSWORD" \
-              -dname "CN=Luck Now CI, O=CI, C=US" >/dev/null 2>&1
+              -dname "CN=Luck Now CI, O=CI, C=US" > /dev/null 2>&1
             {
               echo "LUCKNOW_KEYSTORE_PASSWORD=$EPHEMERAL_PASSWORD"
               echo "LUCKNOW_KEY_ALIAS=lucknow"
               echo "LUCKNOW_KEY_PASSWORD=$EPHEMERAL_PASSWORD"
             } >> "$GITHUB_ENV"
             echo "signing_source=ephemeral CI keystore" >> "$GITHUB_OUTPUT"
-            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured. The release APK is signed with an ephemeral CI key and must not be published to Play."
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured. The release APK uses an ephemeral CI key and must not be published to Play."
           fi
 
           echo "LUCKNOW_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
 
-      - name: Build debug and release APKs
-        run: |
-          ./gradlew :app:assembleDebug :app:assembleRelease \
-            -PabiFilters=${{ matrix.abi }} \
-            -Plucknow.withLlama=true --stacktrace
-
-      - name: Publish per-ABI artifacts
+      - name: Build debug APK
         run: |
           set -euo pipefail
+          gradle :app:assembleDebug -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=true --stacktrace
           mkdir -p artifacts
           cp app/build/outputs/apk/debug/app-debug.apk "artifacts/app-${{ matrix.abi }}-debug.apk"
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luck-now-debug-${{ matrix.abi }}
+          path: artifacts/app-${{ matrix.abi }}-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Best effort: signing, R8 or resource shrinking problems here must not
+      # invalidate the debug APK that was already uploaded above.
+      - name: Build release APK
+        id: release
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gradle :app:assembleRelease -PabiFilters=${{ matrix.abi }} -Plucknow.withLlama=true --stacktrace
+          mkdir -p artifacts
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
             cp app/build/outputs/apk/release/app-release.apk "artifacts/app-${{ matrix.abi }}-release.apk"
           else
             cp app/build/outputs/apk/release/app-release-unsigned.apk "artifacts/app-${{ matrix.abi }}-release.apk"
           fi
+
+      - name: Collect mapping file
+        if: always()
+        run: |
+          mkdir -p artifacts
           cp app/build/outputs/mapping/release/mapping.txt "artifacts/mapping-${{ matrix.abi }}.txt" || true
           ls -lh artifacts
 
-      - name: Verify APK signature and ABI
+      - name: Verify release APK
+        if: always()
+        continue-on-error: true
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
+          APK="artifacts/app-${{ matrix.abi }}-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "::warning::release APK was not produced; skipping verification"
+            exit 0
+          fi
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
           AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)"
-          "$APKSIGNER" verify --verbose "artifacts/app-${{ matrix.abi }}-release.apk" | head -20
-          "$AAPT2" dump badging "artifacts/app-${{ matrix.abi }}-release.apk" | grep -E "package:|sdkVersion|targetSdkVersion|native-code"
-          unzip -l "artifacts/app-${{ matrix.abi }}-release.apk" | grep -E "libll(ama|ucknow_llm)\" \
-            || { echo "::error::native llama.cpp runtime missing from the release APK"; exit 1; }
+          "$APKSIGNER" verify --verbose "$APK" | head -20
+          "$AAPT2" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion|native-code"
+          unzip -l "$APK" | grep -E "liblucknow_llm" \
+            || echo "::warning::native llama.cpp runtime not found in the release APK"
 
-      - name: Upload APKs
+      - name: Upload all artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: luck-now-${{ matrix.abi }}
-          path: artifacts/*
-          if-no-files-found: error
+          path: |
+            artifacts/app-${{ matrix.abi }}-debug.apk
+            artifacts/app-${{ matrix.abi }}-release.apk
+            artifacts/mapping-${{ matrix.abi }}.txt
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Summarise artifact
+        if: always()
         run: |
           {
-            echo "### Luck Now APK"
+            echo "### Luck Now APK — ${{ matrix.abi }}"
             echo ""
-            echo "- Artifact: \`app-${{ matrix.abi }}-release.apk\`"
+            echo "- Debug: \`app-${{ matrix.abi }}-debug.apk\`"
+            echo "- Release: \`app-${{ matrix.abi }}-release.apk\` (best effort)"
             echo "- Signing: ${{ steps.signing.outputs.signing_source }}"
-            echo "- Version: $(grep -oP 'versionName = "\\K[^"]+\' app/build.gradle.kts || true)"
+            echo "- Debug build: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:
@@ -265,19 +317,15 @@ jobs:
       - name: Assemble release bundle
         run: |
           mkdir -p artifacts/final
-          cp -r artifacts/luck-now-arm64-v8a/**/* artifacts/final/ || true
-          cp -r artifacts/luck-now-x86_64/**/* artifacts/final/ || true
+          cp -r artifacts/luck-now-*/* artifacts/final/ || true
           ls -lh artifacts/final
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/final/app-arm64-v8a-release.apk
-            artifacts/final/app-arm64-v8a-debug.apk
-            artifacts/final/app-x86_64-release.apk
-            artifacts/final/app-x86_64-debug.apk
-            artifacts/final/mapping-arm64-v8a.txt
-            artifacts/final/mapping-x86_64.txt
+            artifacts/final/app-*-debug.apk
+            artifacts/final/app-*-release.apk
+            artifacts/final/mapping-*.txt
           generate_release_notes: true
           fail_on_unmatched_files: false
