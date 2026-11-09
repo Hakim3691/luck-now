@@ -159,6 +159,16 @@ chaquopy {
     }
 }
 
+// compileOptions pins the Java toolchain to 17, but the Kotlin plugin otherwise targets
+// whatever JDK runs Gradle (21 on CI runners), and AGP then fails the build with
+// "Inconsistent JVM-target compatibility". Pin the Kotlin JVM target explicitly so the
+// build is identical on a JDK 17 or JDK 21 machine.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
