@@ -30,7 +30,9 @@ permissions:
 jobs:
   unit-tests:
     name: Unit tests and Android Lint
-    runs-on: ubuntu-latest
+    # Pinned: the ubuntu-latest label now resolves to the 26.04 image, which no longer
+    # ships the Android SDK; 24.04 keeps the toolchain reproducible.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +48,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      # The runner image does not reliably provide an Android SDK, so install it here:
+      # AGP needs platform 35 + build-tools to configure, and the NDK step needs sdkmanager.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -70,7 +79,7 @@ jobs:
 
   python-tests:
     name: Python statistical engine
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -90,7 +99,9 @@ jobs:
 
   bdd:
     name: BDD (Cucumber-Android on API 34)
-    runs-on: ubuntu-latest
+    # Pinned: the ubuntu-latest label now resolves to the 26.04 image, which no longer
+    # ships the Android SDK; 24.04 keeps the toolchain reproducible.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       matrix:
@@ -109,6 +120,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      # The emulator action installs the system image, but Gradle still needs a
+      # configured SDK with platform 35 to build the test APK.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -146,7 +164,9 @@ jobs:
     name: Build APK (${{ matrix.abi }})
     # Deliberately independent of the test jobs: a lint, unit-test or emulator
     # failure must never stop the debug APK from being produced.
-    runs-on: ubuntu-latest
+    # Pinned: the ubuntu-latest label now resolves to the 26.04 image, which no longer
+    # ships the Android SDK; 24.04 keeps the toolchain reproducible.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       matrix:
@@ -165,6 +185,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      # The NDK step below needs sdkmanager on PATH, and AGP needs platform 35.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -304,7 +330,7 @@ jobs:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-apk
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

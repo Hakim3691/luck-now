@@ -1,4 +1,8 @@
-# Deploy workflow: pushes APK releases to GitHub
+# Deploy workflow: mirrors the APK artifacts to a long-lived `releases` branch.
+#
+# This is a best-effort mirror; the authoritative per-tag publishing happens in
+# build-apk.yml (github-release job). It is therefore allowed to do nothing:
+# without DEPLOY_KEY the publish step exits successfully instead of failing.
 
 name: Deploy Releases
 
@@ -9,12 +13,13 @@ on:
       - 'app/build.gradle.kts'
       - '.github/workflows/build-apk.yml'
       - 'app/src/main/**'
-      - 'app/build/**'
   workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Pinned: the ubuntu-latest label now resolves to the 26.04 image, which no longer
+    # ships the Android SDK; 24.04 keeps the toolchain reproducible.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -23,8 +28,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Artifacts are per-run, so a separate workflow only ever sees what a previous
+      # run left behind. Missing artifacts must not fail the mirror.
       - name: Download APK artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           pattern: luck-now-*
           path: artifacts
@@ -33,21 +41,35 @@ jobs:
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          # Decode the deploy key and set up SSH
-          echo "$DEPLOY_KEY" | base64 -d > ~/.ssh/lucknow_deploy
+          set -euo pipefail
+
+          # Nothing to publish without the key; skipping is not a pipeline failure.
+          if [ -z "${DEPLOY_KEY:-}" ]; then
+            echo "::notice::DEPLOY_KEY is not configured; skipping the releases branch publish."
+            exit 0
+          fi
+
+          if [ ! -d artifacts ] || [ -z "$(ls -A artifacts)" ]; then
+            echo "::notice::No APK artifacts available in this run; nothing to mirror."
+            exit 0
+          fi
+
+          # Decode the deploy key and set up SSH.
+          install -d -m 700 ~/.ssh
+          printf '%s' "$DEPLOY_KEY" | base64 -d > ~/.ssh/lucknow_deploy
           chmod 600 ~/.ssh/lucknow_deploy
-          cat >> ~/.ssh/config << 'EOF'
+          {
+            echo ""
+            echo "Host github.com"
+            echo "  IdentityFile ~/.ssh/lucknow_deploy"
+            echo "  IdentitiesOnly yes"
+          } >> ~/.ssh/config
 
-Host github.com
-  IdentityFile ~/.ssh/lucknow_deploy
-  IdentitiesOnly yes
-EOF
-
-          # Configure git
+          # Configure git.
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          # Push the artifacts to a releases branch
+          # Push the artifacts to a releases branch.
           git checkout -b releases
           git add -f artifacts/
           git commit -m "Add release artifacts [skip ci]" || echo "No changes to commit"
