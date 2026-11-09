@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ascending sequence bars -->
+    <path
+        android:fillColor="#F5C542"
+        android:pathData="M34,74 h8 v-14 h-8 z" />
+    <path
+        android:fillColor="#F5C542"
+        android:pathData="M50,74 h8 v-24 h-8 z" />
+    <path
+        android:fillColor="#F5C542"
+        android:pathData="M66,74 h8 v-34 h-8 z" />
+
+    <!-- Trend line -->
+    <path
+        android:fillColor="#6EE7F9"
+        android:pathData="M33,55 L46,44 L58,49 L76,30 L78,34 L58,53 L46,48 L35,59 z" />
+
+    <path
+        android:fillColor="#6EE7F9"
+        android:pathData="M74,30 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
+</vector>

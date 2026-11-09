@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luck Now</string>
+    <string name="app_tagline">On-device lottery sequence auditor</string>
+
+    <string name="home_url_label">Lottery results URL</string>
+    <string name="home_url_placeholder">https://example-lottery.com/results</string>
+    <string name="home_analyze">Analyze</string>
+    <string name="home_history">Audit trail</string>
+    <string name="home_history_empty">No scans yet. Every scan is stored on this device only.</string>
+    <string name="home_model_ready">Local Qwen 0.5B ready</string>
+    <string name="home_model_missing">Local Qwen 0.5B not installed</string>
+    <string name="home_download_model">Download model</string>
+    <string name="home_privacy">Nothing leaves this device. Parsing and statistics run offline.</string>
+
+
+
+
+</resources>
