@@ -6,6 +6,10 @@ data class ScrapeConfig(
     val stepDelayMs: Long = 900,
     val pageLoadTimeoutMs: Long = 20_000,
     val settleTimeoutMs: Long = 45_000,
+    /** Per scroll step; a renderer that stops answering must not stall the scan. */
+    val stepTimeoutMs: Long = 4_000,
+    /** Grace window for a cookie/JS challenge page that reloads itself. */
+    val reloadGraceMs: Long = 1_500,
 )
 
 data class InterceptionResult(
