@@ -16,7 +16,7 @@ app/src/androidTest/java/com/lucknow/bdd/       runner + steps
 | `dynamic_interception.feature` | 1 | Real `MainActivity` (ActivityScenario) + real hidden `WebViewInterceptionDriver` against a local MockWebServer page that fetches paginated JSON on scroll. Asserts the page loaded, JSON was captured, and the captured documents reach the parsing module (24 integers from 2 pages). |
 | `llm_normalization.feature` | 3 | `QwenSequenceExtractor` with a scripted engine: rigid prompt content, strict integer array, draw-volume equality, self-healing retry with the validation error injected, and deterministic fallback when no runtime/model is available. |
 | `prng_detection.feature` | 2 | Real Chaquopy + `scipy`/`statsmodels`: a period-6 sequence must produce a significant ACF at lag 6 and the UI headline `PRNG Flaw Detected`; a SHA-256-mixed sequence must not be flagged. |
-| `mechanical_bias.feature` | 1 | Real chi-square on a skewed 200-draw fixture; significant p-value and `Mechanical Bias Detected` headline. |
+| `mechanical_bias.feature` | 1 | Real chi-square on a skewed 200-draw fixture whose order is SHA-256 mixed (a loaded machine skews the distribution, not the order); significant p-value with no autocorrelation lag, so the headline is `Mechanical Bias Detected`. |
 | `offline_processing.feature` | 1 | Analysis with no server: report must come from `lucknow-python` and expose local scipy/statsmodels versions. |
 | `audit_trail.feature` | 1 | Real `SqliteScanStore` write/read of a completed run and its dataset. |
 
@@ -32,11 +32,15 @@ without an emulator.
 
 ## Fixtures are verified host-side
 
-The "well mixed" and "periodic" fixtures are deterministic and were validated against the exact
-statistical engine by `python_tests/test_analysis.py`, so a failing scenario indicates a regression
-rather than a flaky random sample. Notably, a false positive in *any* of 20 lags is not rare
-(~64% at α = 0.05), which is why the clean fixture is a cryptographically mixed sequence verified to
-have no significant lag.
+The "well mixed", "periodic" and "loaded machine" fixtures are deterministic and were validated
+against the exact statistical engine by `python_tests/test_analysis.py`, so a failing scenario
+indicates a regression rather than a flaky random sample.
+
+The loaded-machine fixture must stay serially independent: blocks of identical draws would also be
+autocorrelated, and because a PRNG finding outranks a bias finding in the headline, the bias
+scenario would then report `PRNG Flaw Detected`. Notably, a false positive in *any* of 20 lags is
+not rare (~64% at α = 0.05), which is why both clean fixtures are cryptographically mixed sequences
+verified to have no significant lag.
 
 ## Running
 
