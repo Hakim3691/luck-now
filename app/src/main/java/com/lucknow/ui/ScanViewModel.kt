@@ -133,9 +133,9 @@ class ScanViewModel(
                 if (documents.isEmpty()) {
                     fail(
                         record.id,
-                        "Nothing analysable on that page: no JSON payload with draw numbers was " +
-                            "intercepted. These sites render results as HTML or hide them behind a " +
-                            "cookie/JS challenge, which this scan cannot normalize.",
+                        "Nothing analysable on that page: it returned no JSON with draw numbers " +
+                            "and no built-in site adapter matched it. dlb.lk and nlb.lk result pages " +
+                            "are read from their rendered tables; other sites need their own adapter.",
                     )
                     return@launch
                 }
