@@ -14,6 +14,7 @@
 │        │     • WebViewClient.shouldInterceptRequest → OkHttp re-fetch   │    │
 │        │     • document-start JS hooks for fetch/XHR                    │    │
 │        │     • scroll/pagination loop, SHA-256 de-duplication           │    │
+│        │     • site adapters for pages that publish HTML only           │    │
 │        │                                                               │    │
 │        ├─ ExtractionSelector → QwenSequenceExtractor ──► LlamaNative    │    │
 │        │        │                                   (liblucknow_llm.so, │    │
@@ -45,6 +46,13 @@ observable state.
    * After `onPageFinished` the driver scrolls and clicks obvious "next" controls until two
      consecutive steps produce no new payload (or limits are reached).
    * Direct JSON endpoints are probed once if nothing was captured.
+   * If the wire produced nothing at all, the rendered document is read through a site adapter
+     (`SiteDrawAdapters` → `DlbResultAdapter`, `NlbResultAdapter`). Adapters are per-site on
+     purpose: dlb.lk and nlb.lk publish no JSON, and their pages differ in structure. The script
+     runs in the page's own origin and posts `{"adapter","label","draws"}` over the bridge, so an
+     endpoint that needs cookies or the page's own pagination still works. `DomDrawPayload` then
+     validates and re-serializes it (at least 10 numbers, 0..999) before it reaches the normalizer,
+     and the wait is a bounded poll rather than an unbounded renderer call.
 4. **Normalize** (`ExtractionSelector`, `QwenSequenceExtractor`):
    * Engine choice is explicit: native runtime present **and** model installed → Qwen; otherwise the
      deterministic parser, flagged `degraded` in the UI.
@@ -57,7 +65,7 @@ observable state.
    * Returns a single JSON document; failures are still JSON (`{"ok": false, ...}`) and surface as a
      snackbar/banner rather than a crash.
 7. **Persist** — `AWAITING_REVIEW` then `COMPLETED` with raw report + verdict, or `FAILED` with the
-     error message.
+   error message.
 
 ## Threading
 
@@ -93,7 +101,8 @@ payloads(id INTEGER PK AUTOINCREMENT, scan_id TEXT, url TEXT, mime_type TEXT,
 | --- | --- |
 | Invalid URL | Inline field error, no run created |
 | Navigation error | Logged; interception continues with whatever arrived |
-| No JSON payloads | Run marked `FAILED` with "No JSON payloads were intercepted" |
+| No JSON and no matching adapter | Run `FAILED`, naming the host and the two supported sites |
+| Site adapter finds nothing usable | Run `FAILED` with the adapter's reason in the scan log |
 | LLM absent / no model | Deterministic parser, `degraded = true`, reason shown |
 | LLM returns invalid output | Up to 3 error-injected retries, then a clear failure |
 | Python interpreter unavailable | `AnalysisException` surfaced in the UI |
