@@ -8,5 +8,10 @@ data class CapturedPayload(
     val capturedAt: Long = System.currentTimeMillis(),
     val source: Source = Source.NETWORK_INTERCEPT,
 ) {
-    enum class Source { NETWORK_INTERCEPT, JS_BRIDGE }
+    enum class Source {
+        NETWORK_INTERCEPT,
+        JS_BRIDGE,
+        /** Draw numbers read from rendered HTML by a [SiteDrawAdapter]. */
+        DOM_ADAPTER,
+    }
 }

@@ -10,6 +10,8 @@ data class ScrapeConfig(
     val stepTimeoutMs: Long = 4_000,
     /** Grace window for a cookie/JS challenge page that reloads itself. */
     val reloadGraceMs: Long = 1_500,
+    /** How long a site adapter may take to read the rendered HTML. */
+    val domAdapterTimeoutMs: Long = 12_000,
 )
 
 data class InterceptionResult(
