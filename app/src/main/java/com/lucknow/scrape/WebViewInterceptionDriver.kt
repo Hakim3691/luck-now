@@ -34,6 +34,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  * that never finishes loading, and a page that reloads itself behind a cookie
  * challenge all end the session with a log line instead of leaving the scan
  * spinning behind a frozen progress bar.
+ *
+ * When the wire yields nothing at all, a [SiteDrawAdapter] reads the rendered
+ * document instead, which is the only way sites like dlb.lk and nlb.lk — that
+ * publish results as HTML — can be scanned.
  */
 class WebViewInterceptionDriver(
     private val activity: Activity,
@@ -70,7 +74,10 @@ class WebViewInterceptionDriver(
         try {
             attach(webView)
             webView.addJavascriptInterface(
-                JsBridge { payload -> accept(payload, onPayload, onLog) },
+                JsBridge(
+                    onJson = { payload -> accept(payload, onPayload, onLog) },
+                    onDraws = { raw -> acceptDraws(raw, onPayload, onLog) },
+                ),
                 JsBridge.NAME,
             )
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -136,6 +143,12 @@ class WebViewInterceptionDriver(
                 if (stagnant >= 2 && steps >= 2) break
             }
             if (steps < config.maxScrollSteps && clock() >= deadline) timedOut = true
+
+            // dlb.lk and nlb.lk publish results as HTML, so no amount of scrolling
+            // produces JSON there. Only when the wire gave us nothing is the page's
+            // rendered document read, and only by a site-specific adapter.
+            if (count() == 0) captureWithSiteAdapter(url, webView, onPayload, onLog, config)
+
             onLog("Interception finished: ${count()} JSON payload(s) in $steps scroll step(s)")
         } finally {
             navigations.close()
@@ -148,6 +161,65 @@ class WebViewInterceptionDriver(
             durationMs = clock() - started,
             pageLoaded = pageLoaded,
             timedOut = timedOut,
+        )
+    }
+
+    /**
+     * Reads results from a page that exposes no JSON, through its site adapter.
+     * The adapter script posts asynchronously over the bridge, so the wait is a
+     * bounded poll rather than a renderer call that could hang the scan.
+     */
+    private suspend fun captureWithSiteAdapter(
+        url: String,
+        webView: WebView,
+        onPayload: (CapturedPayload) -> Unit,
+        onLog: (String) -> Unit,
+        config: ScrapeConfig,
+    ) {
+        val adapter = SiteDrawAdapters.forUrl(url)
+        if (adapter == null) {
+            val host = SiteDrawAdapters.hostOf(url) ?: url
+            onLog("No JSON and no HTML adapter for $host; nothing to analyse")
+            return
+        }
+
+        val before = count()
+        onLog("No JSON on that page; reading the rendered results with the ${adapter.site} adapter")
+        val launched = withTimeoutOrNull(config.stepTimeoutMs) { webView.evaluateScript(adapter.script) }
+        if (launched == null) {
+            onLog("The ${adapter.site} adapter did not run: the page stopped responding")
+            return
+        }
+
+        val deadline = clock() + config.domAdapterTimeoutMs
+        while (count() == before && clock() < deadline) delay(ADAPTER_POLL_MS)
+        if (count() == before) onLog("The ${adapter.site} adapter found no draw numbers on this page")
+    }
+
+    /**
+     * A site adapter reports draw numbers rather than a raw API response, so the
+     * document is validated and re-serialized before it can reach the normalizer.
+     */
+    private fun acceptDraws(
+        raw: String,
+        onPayload: (CapturedPayload) -> Unit,
+        onLog: (String) -> Unit,
+    ) {
+        val draws = DomDrawPayload.parse(raw)
+        if (draws == null) {
+            onLog("Site adapter returned no usable draw numbers")
+            return
+        }
+        val label = draws.label?.let { "$it · " }.orEmpty()
+        onLog("Site adapter read $label${draws.drawCount} draw(s), ${draws.values.size} numbers")
+        accept(
+            CapturedPayload(
+                url = "adapter://${draws.adapter}" + (draws.label?.let { "/$it" } ?: ""),
+                body = DomDrawPayload.toJson(draws),
+                source = CapturedPayload.Source.DOM_ADAPTER,
+            ),
+            onPayload,
+            onLog,
         )
     }
 
@@ -249,17 +321,27 @@ class WebViewInterceptionDriver(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    private class JsBridge(private val onPayload: (CapturedPayload) -> Unit) {
+    private class JsBridge(
+        private val onJson: (CapturedPayload) -> Unit,
+        private val onDraws: (String) -> Unit,
+    ) {
         @JavascriptInterface
         fun postJson(url: String, body: String) {
             if (body.length > MAX_JS_BODY) return
-            onPayload(
+            onJson(
                 CapturedPayload(
                     url = url.take(2048),
                     body = body,
                     source = CapturedPayload.Source.JS_BRIDGE,
                 ),
             )
+        }
+
+        /** Used by [SiteDrawAdapter] scripts, which read the rendered document. */
+        @JavascriptInterface
+        fun postDraws(json: String) {
+            if (json.length > MAX_JS_BODY) return
+            onDraws(json)
         }
 
         companion object {
@@ -270,5 +352,6 @@ class WebViewInterceptionDriver(
 
     private companion object {
         const val MAX_FOLLOW_UP_NAVIGATIONS = 3
+        const val ADAPTER_POLL_MS = 250L
     }
 }
